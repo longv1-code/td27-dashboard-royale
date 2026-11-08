@@ -4,7 +4,7 @@
 FROM python:3.12-slim
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir fastapi==0.162.2 "uvicorn[standard]==0.54.0" httpx==0.28.1 pymongo "psycopg[binary]"
+RUN pip install --no-cache-dir -r requirements.txt
 COPY server ./server
 COPY web ./web
 ENV PORT=8080

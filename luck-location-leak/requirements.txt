@@ -1,8 +1,4 @@
-# Versions tested for this submission (pipeline + server)
-duckdb==2.0.0
-pandas==3.1.1
-pyarrow==26.0.1
-numpy==2.4.6
+# Server + dashboard (this is all you need to run the site, locally or on Vercel / Vultr)
 fastapi==0.162.2
 uvicorn[standard]==0.54.0
 httpx==0.28.1

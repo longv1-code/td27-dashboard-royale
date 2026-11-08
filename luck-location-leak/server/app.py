@@ -464,6 +464,8 @@ def hourly(machine_id: str, start: str = "2025-01-01", end: str = "2025-07-01"):
 # ---------------------------------------------------------------- static dashboard
 @app.get("/", response_class=HTMLResponse)
 def index():
+    if not (WEB / "index.html").exists():
+        raise HTTPException(404, "Dashboard files are served separately")
     page = (WEB / "index.html").read_text(encoding="utf-8")
     if page.lstrip().lower().startswith("<!doctype"):
         return page  # index.html is already a full document; don't nest it in a second <html>
@@ -471,7 +473,8 @@ def index():
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\"></head><body>" + page + "</body></html>")
 
 
-app.mount("/", StaticFiles(directory=WEB), name="web")
+if WEB.is_dir():  # absent inside the Vercel function bundle, where Vercel serves web/ itself
+    app.mount("/", StaticFiles(directory=WEB), name="web")
 
 
 @app.exception_handler(httpx.HTTPError)
