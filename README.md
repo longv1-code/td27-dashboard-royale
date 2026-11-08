@@ -17,7 +17,7 @@ cp .env.example .env                                   # optional: paste your ke
 uvicorn server.app:app --port 8080                     # open http://localhost:8080
 ```
 
-The processed data (`web/data/data.json`) is included, so the dashboard runs without the challenge dataset. To rebuild it: `python pipeline/build.py --data path/to/dashboard-royale/data`. With no API keys, "Ask the Pit Boss" falls back to keyword search over the evidence table.
+The processed data (`web/data/data.json`) is included, so the dashboard runs without the challenge dataset. To rebuild it: `pip install -r requirements-pipeline.txt`, then `python pipeline/build.py --data path/to/dashboard-royale/data`. With no API keys, "Ask the Pit Boss" falls back to keyword search over the evidence table.
 
 ## What judges can do (per the guide)
 

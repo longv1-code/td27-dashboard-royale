@@ -1,11 +1,6 @@
-# secrets
 .env
-
-# Python
-__pycache__/
-*.pyc
+**/.env
 .venv/
-
-# editor / OS
-.DS_Store
-.vscode/
+**/.venv/
+**/__pycache__/
+*.zip
