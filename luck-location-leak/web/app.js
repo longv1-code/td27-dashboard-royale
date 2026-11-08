@@ -8,6 +8,11 @@
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const store = { get(k, d) { try { const v = localStorage.getItem("gla:" + k); return v == null ? d : JSON.parse(v); } catch { return d; } }, set(k, v) { try { localStorage.setItem("gla:" + k, JSON.stringify(v)); } catch { } } };
 
+  // optional server features (Gemini, MongoDB Atlas); the page works fully without them
+  const SRV = { llm: null, embed: null, mongo: false };
+  const healthP = fetch("/api/health").then((r) => (r.ok ? r.json() : null)).then((j) => { if (j) Object.assign(SRV, j); }).catch(() => { });
+  const post = async (url, body) => { const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }); if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status); return r.json(); };
+
   let D;
   try { D = await (await fetch("data/data.json")).json(); }
   catch (e) { $("#loading").textContent = "Could not load data/data.json. Run pipeline/build.py first, then serve the web/ folder over HTTP."; return; }
@@ -115,33 +120,30 @@
   $("#tabs").append(...VIEWS.map(([id, b, n, c]) => h(`<a href="#${id}" role="tab" data-v="${id}" style="--c:${c}" data-tip="${TABTIP[id]}"><span class="tchip" aria-hidden="true"></span><b>${b}</b>${n}</a>`)));
   const view = () => { const v = location.hash.slice(1); return VIEWS.some((x) => x[0] === v) ? v : "verdict"; };
   window.addEventListener("hashchange", () => { render(); window.scrollTo({ top: 0 }); });
-  let rT; window.addEventListener("resize", () => { clearTimeout(rT); rT = setTimeout(render, 150); });
+  let rT; window.addEventListener("resize", () => { clearTimeout(rT); rT = setTimeout(() => { C.instant(true); render(); C.instant(false); }, 150); });
 
   // full-period evidence used by the plan and the appendix (stable regardless of the period picker)
   const FULL = machineStats(0, T - 1);
 
   // ---------------------------------------------------------------- render dispatcher
-  let cur;
+  let cur, lastView = null;
   function render() {
     d0.value = D.dates[S.t0]; d1.value = D.dates[S.t1];
     [...$("#presets").children].forEach((b, k) => b.setAttribute("aria-pressed", String(PRESETS[k][1] === S.t0 && PRESETS[k][2] === S.t1)));
     zs.value = S.zone; fillBanks();
     const v = view();
+    // a new tab deals its cards in; a period / zone / bank / slider change morphs what is already on screen
+    const fresh = v !== lastView; lastView = v;
+    if (fresh) { C.forget(); stackMem.clear(); }
     [...$("#tabs").children].forEach((a) => a.setAttribute("aria-current", a.dataset.v === v ? "page" : "false"));
     cur = machineStats(S.t0, S.t1);
     $("#stage").classList.toggle("slim", v !== "verdict");
+    $("#fan").classList.toggle("settle", !fresh);
     renderFan();
-    const main = $("#main"); main.innerHTML = "";
+    const main = $("#main"); main.innerHTML = ""; main.classList.toggle("settle", !fresh);
     ({ verdict: vVerdict, demand: vDemand, downtime: vDowntime, players: vPlayers, comps: vComps, model: vModel, plan: vPlan, evidence: vEvidence })[v](main);
     main.querySelectorAll(".panel").forEach((p, k) => p.style.setProperty("--i", Math.min(k, 8)));
-    main.querySelectorAll(".voucher .v").forEach(countUp);
-  }
-  // animate the first number inside a string ("$1.06M", "9 / 10", "16.1%") from 0 to its value
-  function countUp(el) {
-    const txt = el.textContent, m = txt.match(/-?[\d,]*\.?\d+/); if (!m || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    const target = parseFloat(m[0].replace(/,/g, "")), dec = (m[0].split(".")[1] || "").length, comma = m[0].includes(","), t0 = performance.now(), dur = 900;
-    const step = (now) => { const p = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - p, 3); let v = (target * e).toFixed(dec); if (comma) v = (+v).toLocaleString("en-US", { minimumFractionDigits: dec, maximumFractionDigits: dec }); el.textContent = txt.replace(m[0], v); if (p < 1) requestAnimationFrame(step); };
-    requestAnimationFrame(step);
+    main.querySelectorAll(".voucher").forEach((vc) => { const n = $(".v", vc); if (n) C.tweenNumber(n, v + "|" + ($(".l", vc)?.textContent || "")); });
   }
   const periodLabel = () => `${D.dates[S.t0]} → ${D.dates[S.t1]} (${S.t1 - S.t0 + 1} days)`;
   const inScope = (r) => (S.zone === "all" || r.zone === S.zone) && (S.bank === "all" || r.bank === S.bank);
@@ -190,8 +192,8 @@
     const fair = active.filter((r) => r.idx && r.on >= Math.min(RULES.minDays, cur.days) && inScope(r)).sort((a, b) => a.idx - b.idx).slice(0, 10);
     const pf = panel("p-fair", "The fair bottom 10", "Theo per available hour ÷ what identical games earn in the same zone. 100% = typical. Whiskers: 95% CI.", "Model: log(theo/available hour) = zone + game, fit on all machines in the period, weighted by available hours. Theo removes luck; per-hour removes downtime and exposure.");
     row2.append(pf);
-    C.bars(pf.querySelector(".body"), { horizontal: true, labelW: 150, ref: 1, min: 0.6, max: 1.25, fmt: (v) => F.pct(v, 0),
-      items: fair.map((r) => ({ label: `${r.id} · ${ZN[r.zone]?.split(" ")[0]}`, value: r.idx, lo: r.idxLo, hi: r.idxHi, color: VERD[r.flags.includes("weak") ? "weak" : r.verdict].color,
+    C.bars(pf.querySelector(".body"), { horizontal: true, labelW: 168, rowH: 34, barMax: 18, ref: 1, min: 0.6, max: 1.25, fmt: (v) => F.pct(v, 0),
+      items: fair.map((r) => ({ key: r.id, label: `${r.id} · ${ZN[r.zone]?.split(" ")[0]}`, value: r.idx, lo: r.idxLo, hi: r.idxHi, color: VERD[r.flags.includes("weak") ? "weak" : r.verdict].color,
         tip: `<div class="th">${r.id} · ${esc(r.m.theme)}</div>${F.pct(r.idx, 0)} of peers (CI ${F.pct(r.idxLo, 0)}–${F.pct(r.idxHi, 0)})<br>${esc(ZN[r.zone])}, bank ${r.bank}<br>Manager's rank: ${mgr.includes(r) ? "in bottom 10" : "not in bottom 10"}` })),
       onClick: (d, i) => { S.sel = fair[i].id; render(); } });
     pf.querySelector(".body").append(h(`<p class="muted" style="font-size:13px">${fair.filter((r) => mgr.includes(r)).length} of these 10 appear on the manager's list. Peer indexes cluster tightly (most machines sit within ±10% of their peers), so a replacement buys little unless the game itself is the problem.</p>`));
@@ -228,8 +230,8 @@
     const ph = panel("p-hit", "Payout fingerprint", "Hit rate is far less noisy than hold. Each dot is a machine: observed hit rate minus its game's published hit probability, in standard errors.", "Source: machine_day.payout_positive_spins / paid_spins vs game_math.hit_probability. Binomial z. |z| > 5 flagged (Bonferroni-safe for 310 machines).");
     row3.append(ph);
     const hz = active.filter((r) => r.spins > 0).sort((a, b) => Math.abs(b.hz) - Math.abs(a.hz));
-    C.bars(ph.querySelector(".body"), { horizontal: true, labelW: 150, ref: 0, fmt: (v) => F.signed(v, 0), vfmt: (v) => "z " + F.signed(v, 1),
-      items: hz.slice(0, 6).map((r) => ({ label: `${r.id} · ${r.m.theme}`, value: r.hz, color: Math.abs(r.hz) > RULES.hitZ ? "var(--v-leak)" : "var(--neutral)", tip: `<div class="th">${r.id}</div>Hit rate ${F.pct(r.hitRate, 2)} vs published ${F.pct(r.g.hit_p, 2)}<br>${F.num(r.spins)} spins` })) });
+    C.bars(ph.querySelector(".body"), { horizontal: true, labelW: 168, rowH: 34, barMax: 18, ref: 0, fmt: (v) => F.signed(v, 0), vfmt: (v) => "z " + F.signed(v, 1),
+      items: hz.slice(0, 6).map((r) => ({ key: r.id, label: `${r.id} · ${r.m.theme}`, value: r.hz, color: Math.abs(r.hz) > RULES.hitZ ? "var(--v-leak)" : "var(--neutral)", tip: `<div class="th">${r.id}</div>Hit rate ${F.pct(r.hitRate, 2)} vs published ${F.pct(r.g.hit_p, 2)}<br>${F.num(r.spins)} spins` })) });
     const lk = hz[0];
     if (lk && Math.abs(lk.hz) > RULES.hitZ) ph.querySelector(".body").append(h(`<p class="callout"><b>${lk.id}</b> hits on ${F.pct(lk.hitRate, 1)} of spins; its published ${esc(lk.m.theme)} paytable hits on ${F.pct(lk.g.hit_p, 1)}. Over ${F.num(lk.spins)} spins that gap is ${F.num(lk.hz, 0)} standard errors, visible from the first day (≈${F.num(lk.hz / Math.sqrt(lk.on), 0)}σ per day). Its hold is ${F.pct(lk.hold, 1)} against a configured ${F.pct(lk.theoHold, 1)}. This is a lead for a paytable inspection, not evidence of wrongdoing. Every other machine is within ±${F.num(Math.abs(hz[1].hz), 1)}σ.</p>`));
 
@@ -287,10 +289,13 @@
       <label class="ctl" for="caseSel">Open another machine <select id="caseSel">${D.machines.map((m) => `<option ${m.id === r.id ? "selected" : ""}>${m.id}</option>`).join("")}</select></label>
       <dl><div><dt>${term("exposure", "Days on floor")}</dt><dd>${r.on}/${r.days}</dd></div><div><dt>${term("coinin", "Coin-in")}</dt><dd>${F.usd(r.ci)}</dd></div><div><dt>${term("housewin", "House win")}</dt><dd>${F.usd(r.hw)}</dd></div><div><dt>${term("theo", "Theo")}</dt><dd>${F.usd(r.theo)}</dd></div><div><dt>${term("hold", "Hold / config")}</dt><dd>${F.pct(r.hold, 1)} / ${F.pct(r.theoHold, 1)}</dd></div><div><dt>${term("availability", "Availability")}</dt><dd>${F.pct(r.avail, 2)}</dd></div><div><dt>${term("occupancy", "Occupancy")}</dt><dd>${F.pct(r.occ, 1)}</dd></div><div><dt>${term("contribution", "Contribution")}</dt><dd>${F.usd(r.contrib)}</dd></div></dl>
       <div class="inspect"><div class="insp-host"></div><div class="steps"><p class="muted" style="font-size:13.5px">Each test, in the order we apply them. The first one that flags decides the verdict.</p></div></div><div class="grid g2"><div id="c-funnel"></div><div id="c-hit"></div></div>
+      ${SRV.mongo ? `<div class="floornotes" id="c-notes"></div>` : ""}
       <div class="src">Contribution = house win − lease − service − power − repair (supplied costs only). Funnel: cumulative house win − theo; band = ±1.96 × √(cumulative Σbet² × variance).</div></section>`);
     if (replace && $("#p-case")) $("#p-case").replaceWith(p); else main.append(p);
     $("#caseSel", p).onchange = (e) => inspect(e.target.value, false);
+    p.querySelectorAll("dl > div").forEach((d) => C.tweenNumber($("dd", d), "case|" + $("dt", d).textContent));
     mountInspector($(".insp-host", p), r, spin);
+    if (SRV.mongo) floorNotes($("#c-notes", p), r);
     const st = $(".steps", p);
     const TK = { exposure: "exposure", leak: "hitz", weak: "peer", downtime: "downtime", location: "location", luck: "luckz" };
     (r.tests || []).forEach((t) => st.append(h(`<div class="step"><span class="t term" tabindex="0" data-term="${TK[t.k]}">${t.name}</span><span>${esc(t.text)}</span><span class="r ${t.flag ? "flag" : "pass"}">${t.flag ? "FLAG" : "pass"}</span></div>`)));
@@ -309,6 +314,62 @@
       yfmt: (v) => F.pct(v, 0), xticks: monthTicks(S.t0, S.t1), tipTitle: (i) => "Week of " + D.dates[wk[i]], aria: "weekly hit rate" });
     hd.append(h(`<div class="legend"><span><i style="background:var(--accent)"></i>Observed</span><span><i style="background:var(--ink)"></i>Published ${F.pct(r.g.hit_p, 1)}</span></div>`));
   }
+  // what the Pit Boss and the note drafter are told about one machine
+  const machineCtx = (r) => ({ id: r.id, theme: r.m.theme, maker: r.m.mfr, zone: ZN[r.zone] || "off floor", bank: r.bank, verdict: VERD[r.verdict].label,
+    days_on_floor: `${r.on}/${r.days}`, hold: F.pct(r.hold, 1), configured_hold: F.pct(r.theoHold, 1),
+    tests: (r.tests || []).map((t) => ({ test: t.name, result: t.flag ? "FLAG" : "pass", detail: t.text })) });
+
+  // floor notes: written by staff (or drafted by Gemini, then edited), stored and vector-searched in MongoDB Atlas
+  function floorNotes(host, r) {
+    host.innerHTML = `<div class="fn-head"><h3>Floor notes</h3><p class="sub">What technicians found on ${r.id}. Notes are saved to MongoDB Atlas, and the Pit Boss searches them when it answers.</p></div>
+      <ol class="notelist" aria-live="polite"><li class="empty">Loading notes…</li></ol>
+      <div class="noteform">
+        <label class="sr" for="noteText">New note for ${r.id}</label>
+        <textarea id="noteText" rows="6" placeholder="What did you find on ${r.id}? For example: paytable chip reads v2.1; the published sheet is v1.4."></textarea>
+        <div class="noterow">
+          <label class="ctl" for="noteAuthor">By <input id="noteAuthor" value="${esc(store.get("author", ""))}" placeholder="Your name" maxlength="40"></label>
+          <label class="ctl" for="noteStatus">Status <select id="noteStatus"><option value="open">Open</option><option value="resolved">Resolved</option></select></label>
+          <span class="spacer"></span>
+          ${SRV.llm ? `<button class="btn small cream" type="button" id="noteDraft">Draft with Gemini</button>` : ""}
+          <button class="btn small red" type="button" id="noteSave">Save note</button>
+        </div>
+        <p class="notemsg" aria-live="polite"></p>
+      </div>`;
+    const list = $(".notelist", host), msg = $(".notemsg", host), ta = $("#noteText", host);
+    let draft = null;
+    const when = (d) => new Date(d).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    const item = (n, isNew) => `<li class="note${isNew ? " new" : ""}"><div class="nmeta"><b class="mono">${esc(n.id)}</b><span>${esc(n.author || "floor")}</span><span>${when(n.created_at)}</span><span class="nstat ${n.status === "resolved" ? "done" : ""}">${n.status === "resolved" ? "Resolved" : "Open"}</span>${n.priority ? `<span class="nprio ${n.priority}">${n.priority} priority</span>` : ""}${n.source === "gemini-draft" ? `<span class="nsrc">Drafted with Gemini</span>` : ""}</div><p>${esc(n.text)}</p></li>`;
+    const empty = `<li class="empty">No notes on ${r.id} yet. After an inspection, write down what you found so the next shift sees it.</li>`;
+    (async () => {
+      try { const res = await fetch(`/api/notes?machine_id=${encodeURIComponent(r.id)}`); if (!res.ok) throw 0; const arr = await res.json(); list.innerHTML = arr.length ? arr.map((n) => item(n)).join("") : empty; }
+      catch { list.innerHTML = `<li class="empty">Notes could not be loaded. Check MONGODB_URI in .env and that Atlas allows this server's IP.</li>`; }
+    })();
+    const dbtn = $("#noteDraft", host);
+    if (dbtn) dbtn.onclick = async () => {
+      dbtn.disabled = true; dbtn.textContent = "Drafting…"; msg.textContent = "";
+      try {
+        const j = await post("/api/notes/draft", { machine: machineCtx(r), period: periodLabel() });
+        const text = `${j.title}\n${j.checks.map((c) => "• " + c).join("\n")}\n\n${j.note}`;
+        draft = { priority: j.priority };
+        // type the draft in so it reads as something just written for this machine
+        C.animate(Math.min(1400, text.length * 6), (t) => { ta.value = text.slice(0, Math.round(text.length * t)); });
+        msg.textContent = `Gemini suggests ${j.priority} priority. Edit the draft, then save it.`;
+      } catch (e) { msg.textContent = `The draft could not be written (${e.message}). You can still type a note yourself.`; }
+      dbtn.disabled = false; dbtn.textContent = "Draft again";
+    };
+    $("#noteSave", host).onclick = async () => {
+      const text = ta.value.trim(); if (!text) { msg.textContent = "Write a note first."; ta.focus(); return; }
+      const author = $("#noteAuthor", host).value.trim(); store.set("author", author);
+      const sb = $("#noteSave", host); sb.disabled = true;
+      try {
+        const n = await post("/api/notes", { machine_id: r.id, author, text, status: $("#noteStatus", host).value, source: draft ? "gemini-draft" : "human", priority: draft?.priority });
+        $(".empty", list)?.remove(); list.insertAdjacentHTML("afterbegin", item(n, true));
+        ta.value = ""; draft = null; msg.textContent = `Saved as ${n.id}. The Pit Boss can now cite it.`;
+      } catch (e) { msg.textContent = `Not saved (${e.message}).`; }
+      sb.disabled = false;
+    };
+  }
+
   function monthTicks(t0, t1) { const out = []; for (let t = t0; t <= t1; t++) if (D.dates[t].endsWith("-01") || t === t0) out.push({ v: t, label: new Date(D.dates[t] + "T12:00").toLocaleString("en-US", { month: "short", day: t === t0 && !D.dates[t].endsWith("-01") ? "numeric" : undefined }) }); return out.length > 7 ? out.filter((_, k) => k % 2 === 0) : out; }
 
   // ================================================================ Q2 DEMAND
@@ -443,12 +504,13 @@
   function vComps(main) {
     const L = D.points_liability, CC = D.comp_change;
     const cols = D.guest_cube_cols, ix = Object.fromEntries(cols.map((c, k) => [c, k]));
-    const months = [...new Set(D.guest_cube.map((r) => r[0]))];
+    const firstMonth = D.dates[S.t0].slice(0, 7), lastMonth = D.dates[S.t1].slice(0, 7);
+    const months = [...new Set(D.guest_cube.map((r) => r[0]))].filter((m) => m >= firstMonth && m <= lastMonth);
     const mm = months.map((m) => { const rr = D.guest_cube.filter((r) => r[0] === m); const s = (c) => rr.reduce((a, r) => a + r[ix[c]], 0); return { m, comp: s("comp"), theo: s("theo"), face: s("comp_face"), n: s("comps"), pe: s("pe"), pr: s("pr") }; });
     const tot = mm.reduce((a, r) => a + r.comp, 0), totTheo = mm.reduce((a, r) => a + r.theo, 0);
     const pre = mm.filter((r) => r.m >= "2025-03" && r.m <= "2025-04"), post = mm.filter((r) => r.m >= "2025-05");
-    const ri = (a) => a.reduce((x, r) => x + r.comp, 0) / a.reduce((x, r) => x + r.theo, 0);
-    main.append(head("Q5 · loyalty program · full window", "On May 1 every comp got about half as expensive in points, and nothing else moved",
+    const ri = (a) => { const theo = a.reduce((x, r) => x + r.theo, 0); return theo ? a.reduce((x, r) => x + r.comp, 0) / theo : 0; };
+    main.append(head(`Q5 · loyalty program · ${periodLabel()}`, "On May 1 every comp got about half as expensive in points, and nothing else moved",
       `Comps cost the house ${F.usd(tot)} (economic cost; face value ${F.usd(mm.reduce((a, r) => a + r.face, 0))}), ${F.pct(tot / totTheo, 2)} of tracked theo. On 2025-05-01 the points needed per comp dollar fell by roughly half in every tier. Redemptions per day did not respond (${L.redemptions_per_day_mar_apr} before, ${L.redemptions_per_day_may_jun} after) and reinvestment edged from ${F.pct(ri(pre), 2)} to ${F.pct(ri(post), 2)}. The quiet cost is the point balance: the ${F.num(L.outstanding / 1e6, 0)}M unredeemed points are now worth ${F.usd(L.liability_post_rate)} at the new rate, up from ${F.usd(L.liability_pre_rate)}.`));
     main.append(kpis([["Comp cost (economic)", F.usd(tot), "counted once (inside POS cogs)"], ["Reinvestment", F.pct(tot / totTheo, 2), "comp cost ÷ tracked theo"], ["Cost per 1,000 points", `$${L.cost_per_1000_pre.toFixed(0)} → $${L.cost_per_1000_post.toFixed(0)}`, "before vs after May 1"], ["Point balance at new rate", F.usd(L.liability_post_rate), `${F.pct(L.redeem_rate_of_awarded, 1)} of points ever redeemed`]]));
     // the bar menu: what a drink costs in points, before and after May 1
@@ -470,7 +532,7 @@
       const a = CC.find((x) => x.tier === barTier && !x.after), b = CC.find((x) => x.tier === barTier && x.after);
       const maxPts = Math.max(...D.comp_items.map((it) => it.face)) * a.pts_per_face_usd;
       $(".body", pb).innerHTML = `<div class="chips" role="group" aria-label="Tier">${["Base", "Gold", "Platinum"].map((t) => `<button class="chip" type="button" aria-pressed="${t === barTier}" data-t="${t}">${t}</button>`).join("")}<button class="btn small red" type="button" id="pour" style="margin-left:auto">${poured ? "Back to April prices" : "Pour the May 1 change"}</button></div>
-        <div class="menu">${D.comp_items.map((it) => { const p0 = Math.round(it.face * a.pts_per_face_usd), p1 = Math.round(it.face * b.pts_per_face_usd); return `<div class="mrow">${icon(it.id)}<span class="mname">${esc(it.id.replace("COMP-", "").toLowerCase())}<small>$${it.face.toFixed(2)} menu · house pays $${it.cost.toFixed(2)}</small></span>
+        <div class="menu">${D.comp_items.map((it, k) => { const p0 = Math.round(it.face * a.pts_per_face_usd), p1 = Math.round(it.face * b.pts_per_face_usd); return `<div class="mrow" style="--row:${k}">${icon(it.id)}<span class="mname">${esc(it.id.replace("COMP-", "").toLowerCase())}<small>$${it.face.toFixed(2)} menu · house pays $${it.cost.toFixed(2)}</small></span>
           <span class="mbar"><i class="was" style="width:${(p0 / maxPts) * 100}%"></i><i class="now" style="width:${((wasPoured ? p1 : p0) / maxPts) * 100}%" data-to="${((poured ? p1 : p0) / maxPts) * 100}"></i></span>
           <span class="mpts">${poured ? `<s>${F.num(p0)}</s> ${F.num(p1)}` : F.num(p0)} pts</span></div>`; }).join("")}</div>
         <p style="font-size:14.5px">${poured ? `After May 1 a ${barTier} player's cocktail costs ${F.num(Math.round(16 * b.pts_per_face_usd))} points instead of ${F.num(Math.round(16 * a.pts_per_face_usd))}. The house still pays the same for the drink, and players did not order more of them, so the visible cost barely moved. What doubled is the value of every unredeemed point.` : `These are April prices. Press pour to apply the May 1 rate.`}</p>`;
@@ -581,12 +643,12 @@
       `Each funded action answers one diagnosis: <b>leak</b> → inspect the one machine with a broken payout fingerprint; <b>location</b> → wayfinding for Back Forty; <b>demand</b> → one tournament weekend the forecast says pays for itself. Replacing the manager's bottom 10, adding technicians and preventive maintenance all fail break-even within 30 days, so we keep the rest.`));
     const SHORT = { "A-INSPECT": "Inspect", "A-WAYFINDING": "Signage", "A-PROMO": "Tournament", "A-COMP-PILOT": "Comp pilot", "A-COMP-CHANGE": "Comp rate", "A-TECH-SHIFT": "Technician", "A-PREVENTIVE": "Maintenance", "A-REPLACE-LEASE": "Lease swap", "A-REPLACE-BUY": "Buy swap", "A-MOVE-MACHINE": "Move machine", "A-MOVE-BANK": "Move bank", "A-SURVEY": "Survey" };
     const CHIPC = ["var(--gold)", "var(--chip-blue)", "var(--neon)", "var(--chip-purple)"];
-    const pile = (amt, col) => { const n = Math.max(1, Math.round(amt / 5000)); return `<span class="pile">${Array.from({ length: n }, (_, k) => `<span style="--k:${k};background:${typeof col === "function" ? col(k) : col}"></span>`).join("")}</span>`; };
+    const pile = (name, amt, col) => { const n = Math.max(1, Math.round(amt / 5000)), had = stackMem.get(name) ?? 0; stackMem.set(name, n); return `<span class="pile">${Array.from({ length: n }, (_, k) => `<span style="--k:${Math.max(0, k - had)};background:${typeof col === "function" ? col(k) : col}${k < had ? ";animation:none" : ""}"></span>`).join("")}</span>`; };
     const spent = sel.map((id) => cost(id, plan[id].q));
     const tbl = h(`<section class="panel felt" id="p-budget"><header><h3>The table · $100,000 bankroll</h3><span class="sub">${sel.length}/3 bets placed · one chip ≈ $5,000</span></header>
       <div class="bankroll"><div class="stacks" aria-label="Chip stacks: kept and each bet">
-        <div class="stack">${pile(100000 - totalCost, (k) => (k % 2 ? "#141414" : "var(--red)"))}<span>Kept<br>${F.usd0(100000 - totalCost)}</span></div>
-        ${sel.map((id, k) => `<div class="stack">${pile(spent[k], CHIPC[k] || CHIPC[3])}<span>${esc(SHORT[id])}<br>${F.usd0(spent[k])}</span></div>`).join("")}
+        <div class="stack">${pile("kept", 100000 - totalCost, (k) => (k % 2 ? "#141414" : "var(--red)"))}<span>Kept<br>${F.usd0(100000 - totalCost)}</span></div>
+        ${sel.map((id, k) => `<div class="stack">${pile(id, spent[k], CHIPC[k] || CHIPC[3])}<span>${esc(SHORT[id])}<br>${F.usd0(spent[k])}</span></div>`).join("")}
       </div>
       <div class="grid g3"><div class="voucher"><span class="l">On the table</span><span class="v">${F.usd0(totalCost)}</span><span class="d">qty × (unit + daily × max(0, 30 − lead))</span></div><div class="voucher" data-term="theo" tabindex="0"><span class="l">Expected payout (theo) <span class="info" aria-hidden="true">i</span></span><span class="v">${F.usd(ben[1])}</span><span class="d">range ${F.usd(ben[0])} – ${F.usd(ben[2])}</span></div><div class="voucher"><span class="l">Net of the bets</span><span class="v">${F.usd(ben[1] - totalCost)}</span><span class="d">low case ${F.usd(ben[0] - totalCost)}</span></div></div></div>
       ${problems.length ? problems.map((p) => `<p class="warnline">✕ ${esc(p)}</p>`).join("") : `<p class="okline">✓ Within budget, at most 3 action types, no conflicting targets.</p>`}
@@ -602,7 +664,7 @@
       const spot = h(`<div class="spot${p.on ? " on" : ""}${!info && odds < 1 ? " bad" : ""}" id="act-${id}">
         <div class="top"><button class="betchip" type="button" style="--c:${col}" aria-pressed="${p.on}" aria-label="${p.on ? "Pull bet on" : "Place bet on"} ${esc(a.name)}"></button>
           <div><h3>${esc(a.name)}</h3><div class="line">${esc(b.target)}</div></div>
-          <div class="odds${!info && odds < 1 ? " neg" : ""}">${info ? "Info" : odds.toFixed(1) + " : 1"}<small class="term" data-term="odds">${info ? "no direct payout" : "expected odds"}</small></div></div>
+          <div class="odds${!info && odds < 1 ? " neg" : ""}"><span class="on">${info ? "Info" : odds.toFixed(1) + " : 1"}</span><small class="term" data-term="odds">${info ? "no direct payout" : "expected odds"}</small></div></div>
         <div class="line"><span>Bet ${F.usd0(c)}</span><span>${b.unit || "theo"} ${F.usd(bf[1])} (${F.usd(bf[0])}–${F.usd(bf[2])})</span><label for="q-${id}">Qty <input type="number" id="q-${id}" min="1" max="${a.quantity_limit}" value="${p.q}"></label></div>
         <details ${openSpots.has(id) ? "open" : ""}><summary>Read the odds</summary>
           <p>${b.effect}</p><p><b>Measure:</b> ${esc(b.measure)}</p>
@@ -616,10 +678,21 @@
       if (b.slider) spot.querySelector(`#sl-${id}`).oninput = (e) => { asm[b.slider[0]] = +e.target.value; e.target.previousElementSibling.textContent = F.pct(+e.target.value, 0); clearTimeout(spot._t); spot._t = setTimeout(save, 300); };
       spot.querySelectorAll(".ev button").forEach((bt) => bt.onclick = () => trace(bt.dataset.v, bt.dataset.p));
       spots.append(spot);
+      C.tweenNumber($(".odds .on", spot), "odds|" + id);
     });
-    const rst = h(`<button type="button" class="btn cream">Reset to our recommended bets</button>`); rst.onclick = () => { store.set("plan", null); store.set("asm", {}); render(); }; main.append(h(`<div></div>`).appendChild(rst).parentNode);
+    const row = h(`<div class="lockrow"><button type="button" class="btn cream" id="planReset">Reset to our recommended bets</button>${SRV.mongo ? `<button type="button" class="btn red" id="planLock"${problems.length ? " disabled" : ""}>Lock in this plan</button>` : ""}<p class="lockmsg">${SRV.mongo ? (problems.length ? "Fix the warnings on the table before locking the plan." : "Locking saves this exact plan to MongoDB Atlas under a SHA-256 fingerprint, so anyone can check the plan they see is the one that was approved.") : ""}</p></div>`);
+    $("#planReset", row).onclick = () => { store.set("plan", null); store.set("asm", {}); render(); };
+    const lb = $("#planLock", row);
+    if (lb) lb.onclick = async () => {
+      lb.disabled = true;
+      const snapshot = { horizon: "2025-07-01 to 2025-07-30", budget: 100000, actions: sel.map((id) => ({ id, name: ACT[id].name, qty: plan[id].q, cost: Math.round(cost(id, plan[id].q)) })),
+        assumptions: asm, total_cost: Math.round(totalCost), theo_low_mid_high: ben.map((v) => Math.round(v)) };
+      try { const j = await post("/api/plan", snapshot); $(".lockmsg", row).innerHTML = `Locked. Fingerprint <b class="mono">${j.sha256.slice(0, 16)}…</b> ${j.new ? "saved to Atlas." : "matches a plan already in Atlas."}`; coinRain(40); }
+      catch (e) { $(".lockmsg", row).textContent = `Could not lock the plan (${e.message}).`; lb.disabled = false; }
+    };
+    main.append(row);
   }
-  const openSpots = new Set();
+  const openSpots = new Set(), stackMem = new Map();
   function trace(v, pid) { location.hash = v; setTimeout(() => { const el = document.getElementById(pid); if (el) { el.scrollIntoView({ behavior: "smooth", block: "center" }); el.classList.add("flash"); setTimeout(() => el.classList.remove("flash"), 1700); } }, 80); }
 
   // ================================================================ EVIDENCE
@@ -649,6 +722,7 @@
     const tb = h(`<div class="tw"><table><thead><tr><th>#</th><th>Claim</th><th>Table / query</th><th>Alternative explanation</th><th>Limitation</th><th></th></tr></thead><tbody></tbody></table></div>`);
     claims().forEach((c) => { const tr = h(`<tr><td class="mono">${c.id}</td><td>${esc(c.claim)}</td><td class="mono" style="font-size:12px">${esc(c.src)}</td><td>${esc(c.alt)}</td><td>${esc(c.lim)}</td><td><button type="button" class="iconbtn">Show</button></td></tr>`); tr.querySelector("button").onclick = () => trace(c.v, c.p); tb.querySelector("tbody").append(tr); });
     p.querySelector(".body").append(tb); main.append(p);
+    if (SRV.mongo) decisionLog(main);
     const gl = panel("p-glossary", "Glossary", "Every term the dashboard uses. The same text appears when you hover or tab to a dotted term.", "");
     gl.querySelector(".body").append(h(`<dl class="gloss">${Object.entries(GLOSS).filter(([k]) => !k.startsWith("v_")).map(([k, [t, d]]) => `<div><dt>${esc(t)}</dt><dd>${esc(d)}</dd></div>`).join("")}${Object.keys(VERD).map((k) => `<div><dt>${chip(k)}</dt><dd>${esc(GLOSS["v_" + k][1])}</dd></div>`).join("")}</dl>`));
     main.append(gl);
@@ -664,8 +738,31 @@
       <li><b>Thresholds.</b> Exposure < ${RULES.exposureShare * 100}% of days · hit |z| > ${RULES.hitZ} · peer < ${RULES.weakIdx * 100}% with CI < ${RULES.weakHi * 100}% · downtime > ${RULES.downShare * 100}% of theo · zone < ${RULES.zoneFactor * 100}% · luck z < ${RULES.luckZ}.</li></ul>`));
     g.append(m);
     const ai = panel("p-ai", "AI-use disclosure", "", "");
-    ai.querySelector(".body").append(h(`<div style="font-size:13.5px;display:grid;gap:6px"><p>Claude (Anthropic) helped explore the data, write the DuckDB pipeline and this dashboard's code, and draft the write-up. Every number was produced by code in this repository and checked against the source tables.</p><p>The optional <b>Ask the Pit Boss</b> panel sends questions plus this page's claims table to Google Gemini through our server. It answers only from those claims and cites them. With no server it falls back to keyword search over the same claims.</p><p>No AI output is used as data.</p></div>`));
+    ai.querySelector(".body").append(h(`<div style="font-size:13.5px;display:grid;gap:6px"><p>Claude (Anthropic) helped explore the data, write the DuckDB pipeline and this dashboard's code, and draft the write-up. Every number was produced by code in this repository and checked against the source tables.</p><p>The optional <b>Ask the Pit Boss</b> panel sends questions, this page's claims table and the most relevant floor notes (found with Gemini embeddings and MongoDB Atlas Vector Search) to Google Gemini through our server. Answers must follow a fixed JSON schema; any citation the page cannot trace is dropped. With no server it falls back to keyword search over the same claims.</p><p><b>Draft with Gemini</b> writes a first draft of an inspection note from a machine's test results. A person edits and saves it; drafts are labelled as such.</p><p>No AI output is used as data.</p></div>`));
     g.append(ai);
+  }
+
+  function decisionLog(main) {
+    const p = panel("p-log", "Decision log", "Live from MongoDB Atlas: what managers asked the Pit Boss, which evidence it leaned on, whether the answers helped, and what the floor wrote down.", "pitboss_log: one $facet aggregation (totals, cited claims, confidence, recent) · notes: $group by machine · plans: latest locked snapshots. Reloads each time this tab opens.");
+    main.append(p);
+    const body = $(".body", p); body.innerHTML = `<p class="muted">Reading the log…</p>`;
+    fetch("/api/insights").then((r) => (r.ok ? r.json() : Promise.reject(r.status))).then((j) => {
+      const a = j.asked || { n: 0 }, votes = (a.up || 0) + (a.down || 0);
+      body.innerHTML = "";
+      if (!a.n && !j.notes.length && !j.plans.length) { body.append(h(`<p class="callout">Nothing logged yet. Ask the Pit Boss a question (bottom right), save a floor note in a case file, or lock a plan on the $100k tab, and it will appear here.</p>`)); return; }
+      const k = kpis([["Questions answered", F.num(a.n), "every answer is stored with its citations"], ["Answers citing evidence", F.pct(a.cited || 0, 0), "share with at least one traceable citation"], ["Rated helpful", votes ? F.pct(a.up / votes, 0) : "–", votes ? `${votes} vote${votes === 1 ? "" : "s"} from managers` : "no votes yet"], ["Average answer time", a.latency ? (a.latency / 1000).toFixed(1) + " s" : "–", `retrieval: ${j.vector ? "Atlas Vector Search" : "in-app cosine"}`]]);
+      body.append(k); k.querySelectorAll(".voucher").forEach((vc) => C.tweenNumber($(".v", vc), "log|" + $(".l", vc).textContent));
+      const g = h(`<div class="grid g2"></div>`); body.append(g);
+      const cl = claims(), left = h(`<div class="logcol"><h4>Most cited evidence</h4><div class="logchart"></div></div>`); g.append(left);
+      if (j.top_cites.length) C.bars($(".logchart", left), { horizontal: true, labelW: 70, rowH: 30, barMax: 16, key: "log-cites", fmt: (v) => F.num(v), vfmt: (v) => F.num(v), items: j.top_cites.map((c) => { const x = cl.find((y) => y.id === c._id); return { key: c._id, label: c._id, value: c.n, color: c._id.startsWith("N-") ? "var(--s3)" : "var(--s1)", tip: `<div class="th">${esc(c._id)} · cited ${c.n}×</div><div class="blurb">${esc(x ? x.claim : "Floor note")}</div>` }; }), onClick: (d) => { const x = cl.find((y) => y.id === d.key); if (x) trace(x.v, x.p); } });
+      else $(".logchart", left).append(h(`<p class="muted">No citations yet.</p>`));
+      const right = h(`<div class="logcol"><h4>Floor notes by machine</h4></div>`); g.append(right);
+      right.append(j.notes.length ? h(`<div class="tw"><table><thead><tr><th>Machine</th><th class="n">Open</th><th class="n">Total</th><th class="n">Gemini drafts</th><th>Last note</th></tr></thead><tbody>${j.notes.map((n) => `<tr class="click" tabindex="0" data-m="${esc(n._id)}"><td class="mono">${esc(n._id)}</td><td class="n">${n.open}</td><td class="n">${n.total}</td><td class="n">${n.ai}</td><td>${n.last ? new Date(n.last).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "–"}</td></tr>`).join("")}</tbody></table></div>`) : h(`<p class="muted">No floor notes yet. Open any machine's case file to add one.</p>`));
+      right.querySelectorAll("tr[data-m]").forEach((tr) => { tr.onclick = tr.onkeydown = (e) => { if (e.type === "keydown" && e.key !== "Enter") return; inspect(tr.dataset.m, true); }; });
+      const g2 = h(`<div class="grid g2"></div>`); body.append(g2);
+      g2.append(h(`<div class="logcol"><h4>Recent questions</h4><ol class="loglist">${a.n ? j.recent.map((r) => `<li><span>${esc(r.question)}</span><small>${r.confidence ? esc(r.confidence) + " confidence" : ""}${r.vote ? (r.vote > 0 ? " · rated helpful" : " · rated not helpful") : ""}</small></li>`).join("") : `<li class="muted">None yet.</li>`}</ol></div>`));
+      g2.append(h(`<div class="logcol"><h4>Locked plans</h4><ol class="loglist">${j.plans.length ? j.plans.map((pl) => `<li><span class="mono">${esc(pl.sha256.slice(0, 16))}…</span><small>${pl.created_at ? new Date(pl.created_at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : ""}${pl.plan && pl.plan.total_cost != null ? " · " + F.usd0(pl.plan.total_cost) : ""}${pl.plan && pl.plan.actions ? " · " + pl.plan.actions.map((x) => esc(x.name)).join(", ") : ""}</small></li>`).join("") : `<li class="muted">None yet. Lock one on the $100k tab.</li>`}</ol></div>`));
+    }).catch(() => { body.innerHTML = `<p class="muted">The decision log could not be read. Check MONGODB_URI in .env and that Atlas allows this server's IP.</p>`; });
   }
 
   // ================================================================ casino FX: icons, glossary, fanned deck, inspector, downtime clock, coins, dice
@@ -881,22 +978,25 @@
     log.append(sg);
   }
   $("#askform").onsubmit = (e) => { e.preventDefault(); const q = $("#askin").value.trim(); if (q) ask(q); $("#askin").value = ""; };
+  const chat = []; // earlier turns, sent to Gemini so follow-ups make sense
   async function ask(q) {
+    log.querySelectorAll(".sugg").forEach((x) => x.remove());
     log.append(h(`<div class="msg me">${esc(q)}</div>`));
-    const pending = h(`<div class="msg bot muted">Checking the evidence…</div>`); log.append(pending); log.scrollTop = log.scrollHeight;
+    const pending = h(`<div class="msg bot muted thinking">Checking the evidence<span>.</span><span>.</span><span>.</span></div>`); log.append(pending); log.scrollTop = log.scrollHeight;
     const cl = claims();
     const mm = q.match(/M-\d{4}/i); const mach = mm ? FULL.rows[midx[mm[0].toUpperCase()]] : null;
-    const context = { period: periodLabel(), claims: cl.map(({ id, claim, src, alt, lim }) => ({ id, claim, src, alt, lim })), machine: mach ? { id: mach.id, verdict: mach.verdict, tests: mach.tests.map((t) => t.name + ": " + t.text + (t.flag ? " [FLAG]" : "")) } : null };
-    let ans = null, cites = [], mode = "";
-    if (llmOn) try {
-      const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 20000);
-      const r = await fetch("/api/ask", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question: q, context }), signal: ctl.signal });
+    const context = { period: periodLabel(), claims: cl.map(({ id, claim, src, alt, lim }) => ({ id, claim, src, alt, lim })), machine: mach ? machineCtx(mach) : null };
+    let res = null, ans = null, cites = [], mode = "", why = "";
+    if (SRV.llm) try {
+      const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 30000);
+      const r = await fetch("/api/ask", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question: q, context, history: chat.slice(-6) }), signal: ctl.signal });
       clearTimeout(to);
-      if (r.ok) { const j = await r.json(); ans = j.answer; cites = j.cites || []; mode = j.provider || "LLM"; }
+      if (r.ok) { res = await r.json(); ans = res.answer; cites = res.cites || []; mode = (res.provider || "Gemini") + (res.retrieval ? ` · notes via ${res.retrieval}` : ""); }
+      else why = r.status === 429 ? "Too many questions in a few minutes, so this one was answered offline. " : "";
     } catch { }
     if (!ans) {
       mode = "offline keyword match";
-      if (mach) { ans = `${mach.id} (${mach.m.theme}, ${ZN[mach.zone] || "off floor"}): verdict ${VERD[mach.verdict].label}. ` + mach.tests.filter((t) => t.flag).map((t) => t.text).join(" ") || "It passes every test."; }
+      if (mach) { ans = `${mach.id} (${mach.m.theme}, ${ZN[mach.zone] || "off floor"}): verdict ${VERD[mach.verdict].label}. ` + (mach.tests.filter((t) => t.flag).map((t) => t.text).join(" ") || "It passes every test."); }
       else {
         const words = q.toLowerCase().split(/\W+/).filter((w) => w.length > 3);
         const scored = cl.map((c) => ({ c, s: words.reduce((a, w) => a + ((c.claim + " " + c.src + " " + c.alt).toLowerCase().includes(w) ? 1 : 0), 0) })).sort((a, b) => b.s - a.s);
@@ -904,16 +1004,35 @@
         ans = top.length ? top.map((x) => x.c.claim).join(" ") : "I couldn't match that to a claim. Try asking about a machine ID, comps, downtime, the model, or the budget.";
         cites = top.map((x) => x.c.id);
       }
+      ans = why + ans;
     }
+    chat.push({ role: "user", text: q }, { role: "model", text: ans });
     pending.remove();
-    const msg = h(`<div class="msg bot"></div>`); msg.textContent = ans;
-    msg.append(h(`<div class="cite">${cites.length ? "Evidence: " + cites.join(", ") + " · " : ""}${esc(mode)}</div>`));
-    cites.forEach((cid) => { const c = cl.find((x) => x.id === cid); if (c) { const b = h(`<button type="button" class="iconbtn" style="margin-top:4px;font-size:11.5px">Show ${cid}</button>`); b.onclick = () => trace(c.v, c.p); msg.append(b); } });
-    log.append(msg); log.scrollTop = log.scrollHeight;
+    const msg = h(`<div class="msg bot"><p class="atext"></p></div>`); log.append(msg);
+    const at = $(".atext", msg);
+    C.animate(Math.min(900, ans.length * 5), (t) => { at.textContent = ans.slice(0, Math.round(ans.length * t)); log.scrollTop = log.scrollHeight; });
+    const meta = h(`<div class="cite">${res && res.confidence ? `<span class="conf ${res.confidence}">${res.confidence} confidence</span> ` : ""}${cites.length ? "Evidence: " + cites.join(", ") + " · " : ""}${esc(mode)}</div>`); msg.append(meta);
+    const acts = h(`<div class="acts"></div>`);
+    cites.forEach((cid) => {
+      const c = cl.find((x) => x.id === cid);
+      if (c) { const b = h(`<button type="button" class="iconbtn">Show ${cid}</button>`); b.onclick = () => trace(c.v, c.p); acts.append(b); return; }
+      const n = res && (res.notes || []).find((x) => x.id === cid);
+      if (n) { const b = h(`<button type="button" class="iconbtn note" data-tip-title="${esc(n.id)} · ${esc(n.machine_id)} · ${esc(n.author || "floor")}" data-tip="${esc(n.text)}">Note ${esc(n.id)}</button>`); b.onclick = () => inspect(n.machine_id, true); acts.append(b); }
+    });
+    ((res && res.machines) || []).filter((id) => midx[id] != null).forEach((id) => { const b = h(`<button type="button" class="iconbtn mach">Inspect ${id}</button>`); b.onclick = () => inspect(id, true); acts.append(b); });
+    if (acts.children.length) msg.append(acts);
+    if (res && res.log_id && SRV.mongo) {
+      const fb = h(`<div class="fb"><span>Was this useful?</span><button type="button" data-v="1">Yes</button><button type="button" data-v="-1">No</button></div>`);
+      fb.querySelectorAll("button").forEach((b) => b.onclick = async () => { fb.innerHTML = `<span>Thanks. Your vote is in the decision log.</span>`; try { await post("/api/feedback", { id: res.log_id, vote: +b.dataset.v }); } catch { fb.innerHTML = `<span>Vote not saved.</span>`; } });
+      msg.append(fb);
+    }
+    const fus = (res && res.follow_ups) || [];
+    if (fus.length) { const sg = h(`<div class="sugg"></div>`); fus.forEach((f) => { const b = h(`<button type="button">${esc(f)}</button>`); b.onclick = () => ask(f); sg.append(b); }); log.append(sg); }
+    log.scrollTop = log.scrollHeight;
   }
-  let llmOn = false;
-  fetch("/api/health").then((r) => r.ok ? r.json() : null).then((j) => { if (j && j.llm) llmOn = true; if (j && j.llm) $("#askmode").textContent = `Answers by ${j.llm}, grounded in the evidence table.`; }).catch(() => { });
+  healthP.then(() => { if (SRV.llm) $("#askmode").textContent = `Answers by ${SRV.llm}, grounded in the evidence table${SRV.mongo ? " and floor notes" : ""}.`; });
 
   $("#buildinfo").textContent = ` Data: ${D.meta.window}.`;
+  await Promise.race([healthP, new Promise((r) => setTimeout(r, 1500))]);
   render();
 })();

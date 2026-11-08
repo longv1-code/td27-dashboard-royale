@@ -1,27 +1,11 @@
-# Environment and secrets
+# secrets
 .env
-.env.*
-!.env.example
 
 # Python
 __pycache__/
-*.py[cod]
-*$py.class
+*.pyc
 .venv/
-venv/
-env/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
 
-# Local generated outputs
-*.log
-dist/
-build/
-*.egg-info/
-
-# Editor and OS files
-.vscode/
-.idea/
+# editor / OS
 .DS_Store
-Thumbs.db
+.vscode/
